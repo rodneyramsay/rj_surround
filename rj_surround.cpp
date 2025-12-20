@@ -1011,7 +1011,7 @@ void RenderFrame() {
             c->timeSeconds = timeSeconds;
             c->useCapture = (g_captureCopiedFrameCounter.load(std::memory_order_relaxed) > 0) ? 1.0f : 0.0f;
             c->isNv12 = 0.0f;
-            c->isBgra = 1.0f;
+            c->isBgra = 0.0f;
 
             // DD composite orientation controls (slice-local flipX in shader).
             c->flipY = usingDd ? 1.0f : 0.0f;
