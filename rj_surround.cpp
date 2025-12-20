@@ -289,7 +289,6 @@ void StopCapture() {
 }
 
 static bool StartDesktopDuplicationOutput0() {
-    // Create duplication for adapter output 0.
     if (!g_d3d.device) return false;
     IDXGIDevice* dxgiDevice = nullptr;
     HRESULT hr = g_d3d.device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice));
@@ -300,10 +299,35 @@ static bool StartDesktopDuplicationOutput0() {
     dxgiDevice->Release();
     if (FAILED(hr) || !adapter) return false;
 
+    HMONITOR primary = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
     IDXGIOutput* output = nullptr;
-    hr = adapter->EnumOutputs(0, &output);
+    for (UINT i = 0;; i++) {
+        IDXGIOutput* out = nullptr;
+        hr = adapter->EnumOutputs(i, &out);
+        if (hr == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(hr) || !out) continue;
+
+        DXGI_OUTPUT_DESC od{};
+        if (SUCCEEDED(out->GetDesc(&od)) && od.Monitor == primary) {
+            output = out;
+            break;
+        }
+        out->Release();
+    }
+    if (!output) {
+        hr = adapter->EnumOutputs(0, &output);
+    }
     adapter->Release();
-    if (FAILED(hr) || !output) return false;
+    if (FAILED(hr) || !output) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "[rj_surround] DD: EnumOutputs failed hr=0x%08X\n", static_cast<unsigned>(hr));
+        OutputDebugStringA(buf);
+        if (g_consoleReady) {
+            fputs(buf, stdout);
+            fflush(stdout);
+        }
+        return false;
+    }
 
     IDXGIOutput1* output1 = nullptr;
     hr = output->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast<void**>(&output1));
@@ -316,7 +340,16 @@ static bool StartDesktopDuplicationOutput0() {
 
     hr = output1->DuplicateOutput(g_d3d.device, &g_ddDup);
     output1->Release();
-    if (FAILED(hr) || !g_ddDup) return false;
+    if (FAILED(hr) || !g_ddDup) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "[rj_surround] DD: DuplicateOutput failed hr=0x%08X\n", static_cast<unsigned>(hr));
+        OutputDebugStringA(buf);
+        if (g_consoleReady) {
+            fputs(buf, stdout);
+            fflush(stdout);
+        }
+        return false;
+    }
 
     g_useDesktopDuplication.store(true, std::memory_order_relaxed);
     g_ddFrameCounter.store(0, std::memory_order_relaxed);
@@ -566,63 +599,118 @@ void RenderFrame() {
     static uint64_t lastSeenFrame = 0;
     const float timeSeconds = static_cast<float>(GetTickCount64()) / 1000.0f;
 
-    // Pull latest WGC texture and copy to our own shader-readable texture.
-    {
-        winrt::com_ptr<ID3D11Texture2D> src;
-        UINT w = 0, h = 0;
-        {
-            std::scoped_lock lk(g_captureMutex);
-            src = g_latestFrameTex;
-            w = g_captureW;
-            h = g_captureH;
+    auto EnsureCaptureTexture = [&](UINT w, UINT h) {
+        bool needCreate = false;
+        if (!g_captureTex || !g_captureSrv) {
+            needCreate = true;
+        } else {
+            D3D11_TEXTURE2D_DESC cur{};
+            g_captureTex->GetDesc(&cur);
+            if (cur.Width != w || cur.Height != h) needCreate = true;
         }
 
-        const uint64_t curFrame = g_captureFrameCounter.load(std::memory_order_relaxed);
-        if (src && curFrame != lastSeenFrame) {
-            bool needCreate = false;
-            if (!g_captureTex || !g_captureSrv) {
-                needCreate = true;
-            } else {
-                D3D11_TEXTURE2D_DESC cur{};
-                g_captureTex->GetDesc(&cur);
-                if (cur.Width != w || cur.Height != h) needCreate = true;
+        if (!needCreate) return;
+
+        std::scoped_lock lk(g_captureMutex);
+        IUnknown* oldSrv = g_captureSrv;
+        SafeRelease(oldSrv);
+        g_captureSrv = nullptr;
+        IUnknown* oldTex = g_captureTex;
+        SafeRelease(oldTex);
+        g_captureTex = nullptr;
+
+        D3D11_TEXTURE2D_DESC sd{};
+        sd.Width = w;
+        sd.Height = h;
+        sd.MipLevels = 1;
+        sd.ArraySize = 1;
+        sd.SampleDesc.Count = 1;
+        sd.Usage = D3D11_USAGE_DEFAULT;
+        sd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+
+        ID3D11Texture2D* newTex = nullptr;
+        if (SUCCEEDED(g_d3d.device->CreateTexture2D(&sd, nullptr, &newTex)) && newTex) {
+            g_captureTex = newTex;
+            ID3D11ShaderResourceView* newSrv = nullptr;
+            if (SUCCEEDED(g_d3d.device->CreateShaderResourceView(g_captureTex, nullptr, &newSrv)) && newSrv) {
+                g_captureSrv = newSrv;
             }
+        }
+        g_captureOwnedFormat.store(static_cast<uint32_t>(DXGI_FORMAT_B8G8R8A8_UNORM), std::memory_order_relaxed);
+    };
 
-            if (needCreate) {
-                std::scoped_lock lk(g_captureMutex);
-                IUnknown* oldSrv = g_captureSrv;
-                SafeRelease(oldSrv);
-                g_captureSrv = nullptr;
-                IUnknown* oldTex = g_captureTex;
-                SafeRelease(oldTex);
-                g_captureTex = nullptr;
-
-                D3D11_TEXTURE2D_DESC sd{};
-                sd.Width = w;
-                sd.Height = h;
-                sd.MipLevels = 1;
-                sd.ArraySize = 1;
-                sd.SampleDesc.Count = 1;
-                sd.Usage = D3D11_USAGE_DEFAULT;
-                sd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-
-                ID3D11Texture2D* newTex = nullptr;
-                if (SUCCEEDED(g_d3d.device->CreateTexture2D(&sd, nullptr, &newTex)) && newTex) {
-                    g_captureTex = newTex;
-                    ID3D11ShaderResourceView* newSrv = nullptr;
-                    if (SUCCEEDED(g_d3d.device->CreateShaderResourceView(g_captureTex, nullptr, &newSrv)) && newSrv) {
-                        g_captureSrv = newSrv;
+    // Pull latest frame and copy to our own shader-readable texture.
+    // Prefer Desktop Duplication when enabled; otherwise use WGC.
+    {
+        const bool useDd = g_useDesktopDuplication.load(std::memory_order_relaxed);
+        if (useDd && g_ddDup) {
+            DXGI_OUTDUPL_FRAME_INFO info{};
+            IDXGIResource* res = nullptr;
+            HRESULT hr = g_ddDup->AcquireNextFrame(0, &info, &res);
+            if (SUCCEEDED(hr) && res) {
+                ID3D11Texture2D* tex2d = nullptr;
+                hr = res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex2d));
+                if (SUCCEEDED(hr) && tex2d) {
+                    D3D11_TEXTURE2D_DESC td{};
+                    tex2d->GetDesc(&td);
+                    g_captureSrcFormat.store(static_cast<uint32_t>(td.Format), std::memory_order_relaxed);
+                    {
+                        std::scoped_lock lk(g_captureMutex);
+                        g_captureW = td.Width;
+                        g_captureH = td.Height;
+                    }
+                    EnsureCaptureTexture(td.Width, td.Height);
+                    if (g_captureTex) {
+                        g_d3d.ctx->CopyResource(g_captureTex, tex2d);
+                        const uint64_t ddCur = g_ddFrameCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+                        g_captureCopiedFrameCounter.store(ddCur, std::memory_order_relaxed);
+                    }
+                    tex2d->Release();
+                }
+                res->Release();
+                g_ddDup->ReleaseFrame();
+            } else if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+                // No new frame this tick.
+            } else if (FAILED(hr)) {
+                static HRESULT s_lastDdAcquireHr = S_OK;
+                if (hr != s_lastDdAcquireHr) {
+                    s_lastDdAcquireHr = hr;
+                    char buf[160];
+                    snprintf(buf, sizeof(buf), "[rj_surround] DD: AcquireNextFrame failed hr=0x%08X (disabling)\n", static_cast<unsigned>(hr));
+                    OutputDebugStringA(buf);
+                    if (g_consoleReady) {
+                        fputs(buf, stdout);
+                        fflush(stdout);
                     }
                 }
-                g_captureOwnedFormat.store(static_cast<uint32_t>(DXGI_FORMAT_B8G8R8A8_UNORM), std::memory_order_relaxed);
+                // If duplication breaks, disable and fall back to WGC.
+                IUnknown* dd = g_ddDup;
+                SafeRelease(dd);
+                g_ddDup = nullptr;
+                g_useDesktopDuplication.store(false, std::memory_order_relaxed);
+            }
+        }
+
+        if (!g_useDesktopDuplication.load(std::memory_order_relaxed)) {
+            winrt::com_ptr<ID3D11Texture2D> src;
+            UINT w = 0, h = 0;
+            {
+                std::scoped_lock lk(g_captureMutex);
+                src = g_latestFrameTex;
+                w = g_captureW;
+                h = g_captureH;
             }
 
-            if (g_captureTex) {
-                g_d3d.ctx->CopyResource(g_captureTex, src.get());
-                g_captureCopiedFrameCounter.store(curFrame, std::memory_order_relaxed);
+            const uint64_t curFrame = g_captureFrameCounter.load(std::memory_order_relaxed);
+            if (src && curFrame != lastSeenFrame) {
+                EnsureCaptureTexture(w, h);
+                if (g_captureTex) {
+                    g_d3d.ctx->CopyResource(g_captureTex, src.get());
+                    g_captureCopiedFrameCounter.store(curFrame, std::memory_order_relaxed);
+                }
+                lastSeenFrame = curFrame;
             }
-            lastSeenFrame = curFrame;
         }
     }
 
@@ -643,10 +731,12 @@ void RenderFrame() {
             secTicker = 0;
             const bool accessAllowed = g_captureAccessAllowed.load(std::memory_order_relaxed);
             const uint64_t arrived = g_captureFrameCounter.load(std::memory_order_relaxed);
-            const uint64_t copied = g_captureCopiedFrameCounter.load(std::memory_order_relaxed);
-            const bool usingCapture = (copied > 0) && (srvLocal != nullptr);
             const uint32_t srcFmt = g_captureSrcFormat.load(std::memory_order_relaxed);
             const uint32_t ownFmt = g_captureOwnedFormat.load(std::memory_order_relaxed);
+            const bool usingDd = g_useDesktopDuplication.load(std::memory_order_relaxed);
+            const uint64_t ddCopied = g_ddFrameCounter.load(std::memory_order_relaxed);
+            const uint64_t copied = usingDd ? ddCopied : g_captureCopiedFrameCounter.load(std::memory_order_relaxed);
+            const bool usingCapture = (copied > 0) && (srvLocal != nullptr);
             UINT w = 0, h = 0;
             {
                 std::scoped_lock lk(g_captureMutex);
@@ -655,6 +745,8 @@ void RenderFrame() {
             }
 
             uint32_t px = 0;
+            uint32_t px2 = 0;
+            uint32_t px3 = 0;
             bool pxOk = false;
             if (g_debugReadback1x1 && srvLocal) {
                 ID3D11Resource* res = nullptr;
@@ -662,19 +754,70 @@ void RenderFrame() {
                 if (res) {
                     ID3D11Texture2D* tex2d = nullptr;
                     if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex2d))) && tex2d) {
-                        D3D11_BOX box{0, 0, 0, 1, 1, 1};
-                        g_d3d.ctx->CopySubresourceRegion(g_debugReadback1x1, 0, 0, 0, 0, tex2d, 0, &box);
-                        D3D11_MAPPED_SUBRESOURCE m{};
-                        if (SUCCEEDED(g_d3d.ctx->Map(g_debugReadback1x1, 0, D3D11_MAP_READ, 0, &m))) {
-                            if (m.pData) {
-                                px = *reinterpret_cast<const uint32_t*>(m.pData);
-                                pxOk = true;
+                        auto Read1x1 = [&](UINT sx, UINT sy, uint32_t& outPx) {
+                            D3D11_BOX box{sx, sy, 0, sx + 1, sy + 1, 1};
+                            g_d3d.ctx->CopySubresourceRegion(g_debugReadback1x1, 0, 0, 0, 0, tex2d, 0, &box);
+                            D3D11_MAPPED_SUBRESOURCE m{};
+                            if (SUCCEEDED(g_d3d.ctx->Map(g_debugReadback1x1, 0, D3D11_MAP_READ, 0, &m))) {
+                                if (m.pData) {
+                                    outPx = *reinterpret_cast<const uint32_t*>(m.pData);
+                                    pxOk = true;
+                                }
+                                g_d3d.ctx->Unmap(g_debugReadback1x1, 0);
                             }
-                            g_d3d.ctx->Unmap(g_debugReadback1x1, 0);
-                        }
+                        };
+
+                        D3D11_TEXTURE2D_DESC rd{};
+                        tex2d->GetDesc(&rd);
+                        const UINT maxX = (rd.Width > 0) ? (rd.Width - 1) : 0;
+                        const UINT maxY = (rd.Height > 0) ? (rd.Height - 1) : 0;
+                        const UINT x0 = 0;
+                        const UINT y0 = 0;
+                        const UINT x1 = rd.Width ? (rd.Width / 2) : 0;
+                        const UINT y1 = rd.Height ? (rd.Height / 2) : 0;
+                        const UINT x2 = (maxX > 8) ? (maxX - 8) : maxX;
+                        const UINT y2 = (maxY > 8) ? (maxY - 8) : maxY;
+
+                        Read1x1(x0, y0, px);
+                        Read1x1(x1, y1, px2);
+                        Read1x1(x2, y2, px3);
                         tex2d->Release();
                     }
                     res->Release();
+                }
+            }
+
+            // Heuristic: if capture content looks "stuck" (only 1-2 pixel values) for long enough,
+            // try Desktop Duplication as a fallback.
+            if (pxOk && !usingDd) {
+                const uint32_t sig = px ^ (px2 * 0x9E3779B1u) ^ (px3 * 0x85EBCA6Bu);
+                if (g_pxSampleCount == 0) {
+                    g_pxA = sig;
+                    g_pxUniqueCount = 1;
+                } else {
+                    if (sig != g_pxA) {
+                        if (g_pxUniqueCount == 1) {
+                            g_pxB = sig;
+                            g_pxUniqueCount = 2;
+                        } else if (g_pxUniqueCount == 2 && sig != g_pxB) {
+                            g_pxUniqueCount = 3; // enough variability
+                        }
+                    }
+                }
+                g_pxSampleCount++;
+
+                // About ~5 seconds (given 1Hz sampling) with <=2 unique samples.
+                if (g_pxSampleCount >= 5 && g_pxUniqueCount <= 2) {
+                    if (StartDesktopDuplicationOutput0()) {
+                        g_pxSampleCount = 0;
+                        g_pxUniqueCount = 0;
+                    }
+                }
+
+                // If we saw enough variability, reset the placeholder suspicion window.
+                if (g_pxUniqueCount >= 3) {
+                    g_pxSampleCount = 0;
+                    g_pxUniqueCount = 0;
                 }
             }
 
@@ -682,7 +825,8 @@ void RenderFrame() {
             snprintf(
                 buf,
                 sizeof(buf),
-                "[rj_surround] access=%d arrived=%llu copied=%llu using=%d size=%ux%u srcFmt=%u(%s) ownFmt=%u(%s) px=%08X pxOk=%d\n",
+                "[rj_surround] backend=%s access=%d arrived=%llu copied=%llu using=%d size=%ux%u srcFmt=%u(%s) ownFmt=%u(%s) px=%08X/%08X/%08X pxOk=%d\n",
+                usingDd ? "DD" : "WGC",
                 accessAllowed ? 1 : 0,
                 static_cast<unsigned long long>(arrived),
                 static_cast<unsigned long long>(copied),
@@ -694,6 +838,8 @@ void RenderFrame() {
                 static_cast<unsigned>(ownFmt),
                 DxgiFormatName(ownFmt),
                 static_cast<unsigned>(px),
+                static_cast<unsigned>(px2),
+                static_cast<unsigned>(px3),
                 pxOk ? 1 : 0);
             OutputDebugStringA(buf);
             if (g_consoleReady) {
