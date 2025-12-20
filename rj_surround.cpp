@@ -49,6 +49,9 @@ struct MonitorDesc {
     RECT rc{};
 };
 
+MonitorDesc g_activeMons[3]{};
+bool g_haveActiveMons = false;
+
 struct OutputWindow {
     HWND hwnd{};
     RECT rc{};
@@ -82,10 +85,9 @@ struct alignas(16) Constants {
     float invViewW;
     float invViewH;
     float flipX;
-    float latencyUs;
-    float showLatency;
     float pad0;
     float pad1;
+    float pad2;
 };
 
 HINSTANCE g_hInstance{};
@@ -605,33 +607,8 @@ bool InitD3D() {
     static const char* kPsSrc =
         "Texture2D capTex : register(t0);"
         "SamplerState capSamp : register(s0);"
-        "cbuffer C : register(b0) { float sliceIndex; float timeSeconds; float useCapture; float isNv12; float isBgra; float flipY; float sliceEnabled; float invViewW; float invViewH; float flipX; float latencyUs; float showLatency; float pad0; float pad1; }"
+        "cbuffer C : register(b0) { float sliceIndex; float timeSeconds; float useCapture; float isNv12; float isBgra; float flipY; float sliceEnabled; float invViewW; float invViewH; float flipX; float pad0; float pad1; float pad2; }"
         "struct PSIn { float4 pos : SV_Position; float2 uv : TEXCOORD0; };"
-        // Small SDF-ish helpers used for the latency overlay (simple 7-segment digits).
-        "float sdBox(float2 p, float2 b) { float2 d = abs(p) - b; return length(max(d,0)) + min(max(d.x,d.y),0); }"
-        "float seg(float2 p, float2 a, float2 b, float r) { float2 pa=p-a, ba=b-a; float h=saturate(dot(pa,ba)/dot(ba,ba)); return length(pa-ba*h)-r; }"
-        "float digit7(float2 p, int d) {"
-        "  float2 A0=float2(-0.35,0.42), A1=float2(0.35,0.42);"
-        "  float2 B0=float2(0.38,0.38),  B1=float2(0.38,0.00);"
-        "  float2 C0=float2(0.38,-0.02), C1=float2(0.38,-0.40);"
-        "  float2 D0=float2(-0.35,-0.42),D1=float2(0.35,-0.42);"
-        "  float2 E0=float2(-0.38,-0.02),E1=float2(-0.38,-0.40);"
-        "  float2 F0=float2(-0.38,0.38), F1=float2(-0.38,0.00);"
-        "  float2 G0=float2(-0.35,0.00), G1=float2(0.35,0.00);"
-        "  int mask=0;"
-        "  if (d==0) mask=0x3F; else if (d==1) mask=0x06; else if (d==2) mask=0x5B; else if (d==3) mask=0x4F;"
-        "  else if (d==4) mask=0x66; else if (d==5) mask=0x6D; else if (d==6) mask=0x7D; else if (d==7) mask=0x07;"
-        "  else if (d==8) mask=0x7F; else if (d==9) mask=0x6F;"
-        "  float r=0.06; float dd=1e9;"
-        "  if (mask&0x01) dd=min(dd, seg(p,A0,A1,r));" // A
-        "  if (mask&0x02) dd=min(dd, seg(p,B0,B1,r));" // B
-        "  if (mask&0x04) dd=min(dd, seg(p,C0,C1,r));" // C
-        "  if (mask&0x08) dd=min(dd, seg(p,D0,D1,r));" // D
-        "  if (mask&0x10) dd=min(dd, seg(p,E0,E1,r));" // E
-        "  if (mask&0x20) dd=min(dd, seg(p,F0,F1,r));" // F
-        "  if (mask&0x40) dd=min(dd, seg(p,G0,G1,r));" // G
-        "  return dd;"
-        "}"
         "float4 main(PSIn i) : SV_Target {"
         // UV mapping: derive 0..1 from SV_Position and viewport size, then optionally slice.
         "  float2 uv = float2(i.pos.x * invViewW, i.pos.y * invViewH);"
@@ -646,30 +623,6 @@ bool InitD3D() {
         "  float4 c = capTex.Sample(capSamp, uv);"
         "  if (useCapture < 0.5) return float4(uv.x, uv.y, 0.15, 1);"
         "  if (isBgra > 0.5) c = c.bgra;"
-        // Latency overlay: GPU-rendered so it remains visible on flip-model + layered windows.
-        "  if (showLatency > 0.5) {"
-        "    float2 p = float2(i.pos.x, i.pos.y);"
-        "    float2 br = float2(256.0, 44.0);" // box size
-        "    float2 tl = float2((1.0/invViewW) - br.x - 12.0, 10.0);" // top-left
-        "    float2 q = (p - (tl + br*0.5)) / br;"
-        "    float box = sdBox(q, float2(0.5,0.5));"
-        "    float a = smoothstep(0.02, -0.02, box);"
-        "    float4 bg = float4(0,0,0,0.45) * a;"
-        "    float us = max(latencyUs, 0.0);"
-        "    int v = (int)(us + 0.5);"
-        "    int d0 = (v/1000)%10; int d1=(v/100)%10; int d2=(v/10)%10; int d3=v%10;"
-        "    float2 lp = (p - (tl + float2(16.0, 10.0))) / float2(24.0, 24.0);"
-        "    lp.y = -lp.y;"
-        "    float ink=0.0;"
-        "    float2 pp = lp;"
-        "    pp.x -= 0.0; ink=max(ink, smoothstep(0.10, 0.00, digit7(pp, d0)));"
-        "    pp = lp; pp.x -= 1.1; ink=max(ink, smoothstep(0.10, 0.00, digit7(pp, d1)));"
-        "    pp = lp; pp.x -= 2.2; ink=max(ink, smoothstep(0.10, 0.00, digit7(pp, d2)));"
-        "    pp = lp; pp.x -= 3.3; ink=max(ink, smoothstep(0.10, 0.00, digit7(pp, d3)));"
-        "    float4 fg = float4(1,1,1,1) * ink * a;"
-        "    c = c*(1.0-bg.a) + bg;"
-        "    c = c*(1.0-fg.a) + fg;"
-        "  }"
         "  return c;"
         "}";
 
@@ -848,6 +801,8 @@ void RenderFrame() {
             static UINT s_tileW = 0;
             static UINT s_tileH = 0;
 
+            bool ddAccessLost = false;
+
             bool anyFrame = false;
             for (int m = 0; m < 3; m++) {
                 DXGI_OUTDUPL_FRAME_INFO info{};
@@ -855,6 +810,9 @@ void RenderFrame() {
                 HRESULT hr = g_ddDup[m]->AcquireNextFrame(0, &info, &res);
                 if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
                     continue;
+                }
+                if (hr == DXGI_ERROR_ACCESS_LOST) {
+                    ddAccessLost = true;
                 }
                 if (FAILED(hr) || !res) {
                     static HRESULT s_lastDdAcquireHr[3] = {S_OK, S_OK, S_OK};
@@ -900,6 +858,16 @@ void RenderFrame() {
                 if (tex2d) tex2d->Release();
                 res->Release();
                 g_ddDup[m]->ReleaseFrame();
+            }
+
+            // Desktop Duplication can be invalidated by display mode changes (fullscreen apps,
+            // resolution/refresh changes, driver resets). Recover by recreating the duplication
+            // objects instead of exiting.
+            if (ddAccessLost && g_haveActiveMons) {
+                StopCapture();
+                if (!StartDesktopDuplicationForMonitors(g_activeMons)) {
+                    g_useDesktopDuplication.store(false, std::memory_order_relaxed);
+                }
             }
 
             if (anyFrame) {
@@ -1196,17 +1164,13 @@ void RenderFrame() {
             c->flipX = 0.0f;
             c->flipY = 0.0f;
 
-            // Latency value is derived from the last frame copy timestamp and published at 1Hz.
-            // Freeze-on-idle ensures we don't "count" desktop inactivity as increased latency.
-            c->latencyUs = GetLatencyWorstOverLastSecondMs();
-            c->showLatency = (ow.sliceIndex == 1) ? 1.0f : 0.0f;
-
             if (ow.sliceIndex == 0) {
                 g_dbgFlipX.store(c->flipX, std::memory_order_relaxed);
                 g_dbgFlipY.store(c->flipY, std::memory_order_relaxed);
             }
             c->pad0 = 0.0f;
             c->pad1 = 0.0f;
+            c->pad2 = 0.0f;
             g_d3d.ctx->Unmap(g_d3d.cb, 0);
         }
 
@@ -1263,6 +1227,11 @@ bool StartTakeover() {
 
     mons.resize(3);
 
+    g_activeMons[0] = mons[0];
+    g_activeMons[1] = mons[1];
+    g_activeMons[2] = mons[2];
+    g_haveActiveMons = true;
+
     if (!InitD3D()) {
         DestroyD3D();
         return false;
@@ -1305,6 +1274,7 @@ bool StartTakeover() {
 void StopTakeover() {
     if (!g_running) return;
     g_running = false;
+    g_haveActiveMons = false;
     StopCapture();
     DestroyOutputs();
     DestroyD3D();
