@@ -18,6 +18,7 @@
 #include <d3d11_3.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
+#include <dxgi1_3.h>
 
 #include <algorithm>
 #include <atomic>
@@ -52,12 +53,18 @@ struct MonitorDesc {
 MonitorDesc g_activeMons[3]{};
 bool g_haveActiveMons = false;
 
+UINT g_expectedWideW = 0;
+UINT g_expectedWideH = 0;
+UINT g_expectedHz = 0;
+bool g_haveExpectedMode = false;
+
 struct OutputWindow {
     HWND hwnd{};
     RECT rc{};
     IDXGISwapChain1* swapchain{};
     ID3D11RenderTargetView* rtv{};
     int sliceIndex{}; // 0,1,2
+    HANDLE frameLatencyWaitable{};
 };
 
 struct D3DState {
@@ -281,6 +288,38 @@ std::vector<MonitorDesc> GetMonitorsSortedLeftToRight() {
     return mons;
 }
 
+static bool TryGetMonitorCurrentMode(HMONITOR mon, UINT& outW, UINT& outH, UINT& outHz) {
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(mon, &mi)) return false;
+
+    DEVMODEW dm{};
+    dm.dmSize = sizeof(dm);
+    if (!EnumDisplaySettingsExW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm, 0)) return false;
+
+    if (dm.dmPelsWidth == 0 || dm.dmPelsHeight == 0) return false;
+    outW = static_cast<UINT>(dm.dmPelsWidth);
+    outH = static_cast<UINT>(dm.dmPelsHeight);
+    outHz = static_cast<UINT>(dm.dmDisplayFrequency);
+    return true;
+}
+
+static bool TryDeriveExpectedTripleWideModeFromMonitors(const MonitorDesc mons[3], UINT& outWideW, UINT& outWideH, UINT& outHz) {
+    UINT w0 = 0, h0 = 0, hz0 = 0;
+    if (!TryGetMonitorCurrentMode(mons[0].handle, w0, h0, hz0)) return false;
+
+    for (int i = 1; i < 3; i++) {
+        UINT wi = 0, hi = 0, hzi = 0;
+        if (!TryGetMonitorCurrentMode(mons[i].handle, wi, hi, hzi)) return false;
+        if (wi != w0 || hi != h0 || hzi != hz0) return false;
+    }
+
+    outWideW = w0 * 3;
+    outWideH = h0;
+    outHz = hz0;
+    return true;
+}
+
 void SafeRelease(IUnknown*& p) {
     if (p) {
         p->Release();
@@ -295,6 +334,10 @@ void ReleaseOutputResources(OutputWindow& ow) {
     IUnknown* sc = ow.swapchain;
     SafeRelease(sc);
     ow.swapchain = nullptr;
+    if (ow.frameLatencyWaitable) {
+        CloseHandle(ow.frameLatencyWaitable);
+        ow.frameLatencyWaitable = nullptr;
+    }
 }
 
 void DestroyOutputs() {
@@ -520,9 +563,19 @@ static bool CreateSwapchainForWindow(OutputWindow& ow) {
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = 2;
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
     HRESULT hr = g_d3d.factory->CreateSwapChainForHwnd(g_d3d.device, ow.hwnd, &desc, nullptr, nullptr, &ow.swapchain);
     if (FAILED(hr) || !ow.swapchain) return false;
+
+    if (ow.sliceIndex == 0) {
+        IDXGISwapChain2* sc2 = nullptr;
+        if (SUCCEEDED(ow.swapchain->QueryInterface(__uuidof(IDXGISwapChain2), reinterpret_cast<void**>(&sc2))) && sc2) {
+            (void)sc2->SetMaximumFrameLatency(1);
+            ow.frameLatencyWaitable = sc2->GetFrameLatencyWaitableObject();
+            sc2->Release();
+        }
+    }
 
     ID3D11Texture2D* back = nullptr;
     hr = ow.swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back));
@@ -747,7 +800,37 @@ void RenderFrame() {
     if (!g_running || !g_d3d.device || !g_d3d.ctx) return;
 
     static uint64_t lastSeenFrame = 0;
+    static uint64_t s_renderFrameCounter = 0;
+    static long long s_lastLatencySeenCopyQpc = 0;
+    static float s_lastCopyToPresentUs = -1.0f;
+    static double s_accTotalMs = 0.0;
+    static double s_accCaptureMs = 0.0;
+    static double s_accRenderMs = 0.0;
+    static double s_accPresentBlockMs = 0.0;
+    static double s_maxPresentBlockMs = 0.0;
+    static double s_maxTotalMs = 0.0;
+    static double s_accWaitMs = 0.0;
+    static double s_maxWaitMs = 0.0;
+    static uint64_t s_accFrameCount = 0;
     const float timeSeconds = static_cast<float>(GetTickCount64()) / 1000.0f;
+
+    EnsureQpcInit();
+    LARGE_INTEGER qpcFrameStart{};
+    (void)QueryPerformanceCounter(&qpcFrameStart);
+    auto QpcToMs = [&](long long dtQpc) -> double {
+        if (g_qpcFreq <= 0) return 0.0;
+        return (static_cast<double>(dtQpc) * 1000.0) / static_cast<double>(g_qpcFreq);
+    };
+
+    double waitMsThisFrame = 0.0;
+    if (!g_outputs.empty() && g_outputs[0].frameLatencyWaitable) {
+        LARGE_INTEGER qpcWaitA{};
+        LARGE_INTEGER qpcWaitB{};
+        (void)QueryPerformanceCounter(&qpcWaitA);
+        (void)WaitForSingleObject(g_outputs[0].frameLatencyWaitable, 100);
+        (void)QueryPerformanceCounter(&qpcWaitB);
+        waitMsThisFrame = QpcToMs(qpcWaitB.QuadPart - qpcWaitA.QuadPart);
+    }
 
     auto EnsureCaptureTexture = [&](UINT w, UINT h) {
         bool needCreate = false;
@@ -792,6 +875,7 @@ void RenderFrame() {
 
     // Pull latest frame and copy to our own shader-readable texture.
     // Prefer Desktop Duplication when enabled; otherwise use WGC.
+    LARGE_INTEGER qpcAfterCapture{};
     {
         const bool useDd = g_useDesktopDuplication.load(std::memory_order_relaxed);
         if (useDd && g_ddDup[0] && g_ddDup[1] && g_ddDup[2]) {
@@ -900,6 +984,8 @@ void RenderFrame() {
         }
     }
 
+    (void)QueryPerformanceCounter(&qpcAfterCapture);
+
     ID3D11ShaderResourceView* srvLocal = nullptr;
     {
         std::scoped_lock lk(g_captureMutex);
@@ -912,17 +998,13 @@ void RenderFrame() {
     // Debug output once per second.
     {
         static ULONGLONG lastLogMs = 0;
+        static uint64_t lastRenderedForFps = 0;
+        static float lastFps = 0.0f;
         const ULONGLONG nowMs = GetTickCount64();
         if (lastLogMs == 0 || (nowMs - lastLogMs) >= 1000) {
+            const ULONGLONG prevLogMs = lastLogMs;
             lastLogMs = nowMs;
-            const bool accessAllowed = g_captureAccessAllowed.load(std::memory_order_relaxed);
-            const uint64_t arrived = g_captureFrameCounter.load(std::memory_order_relaxed);
-            const uint32_t srcFmt = g_captureSrcFormat.load(std::memory_order_relaxed);
-            const uint32_t ownFmt = g_captureOwnedFormat.load(std::memory_order_relaxed);
             const bool usingDd = g_useDesktopDuplication.load(std::memory_order_relaxed);
-            const uint64_t ddCopied = g_ddFrameCounter.load(std::memory_order_relaxed);
-            const uint64_t copied = usingDd ? ddCopied : g_captureCopiedFrameCounter.load(std::memory_order_relaxed);
-            const bool usingCapture = (copied > 0) && (srvLocal != nullptr);
             UINT w = 0, h = 0;
             {
                 std::scoped_lock lk(g_captureMutex);
@@ -930,142 +1012,67 @@ void RenderFrame() {
                 h = g_captureH;
             }
 
-            UINT outW = 0, outH = 0;
-            if (!g_outputs.empty()) {
-                outW = static_cast<UINT>(g_outputs[0].rc.right - g_outputs[0].rc.left);
-                outH = static_cast<UINT>(g_outputs[0].rc.bottom - g_outputs[0].rc.top);
+            const uint64_t rendered = s_renderFrameCounter;
+            const uint64_t dFrames = rendered - lastRenderedForFps;
+            if (prevLogMs != 0 && nowMs > prevLogMs) {
+                const double dtSec = static_cast<double>(nowMs - prevLogMs) / 1000.0;
+                if (dtSec > 0.0) lastFps = static_cast<float>(static_cast<double>(dFrames) / dtSec);
             }
-            const bool sliceEnabled = (outW > 0) ? (w >= (outW * 3 - 32)) : false;
-            const char* mode = sliceEnabled ? "slice" : "mirror";
+            lastRenderedForFps = rendered;
 
-            const float logFlipY = g_dbgFlipY.load(std::memory_order_relaxed);
-            const float logFlipX = g_dbgFlipX.load(std::memory_order_relaxed);
+            const float fps = lastFps;
+            const float latencyUs = s_lastCopyToPresentUs;
 
-            UINT cW = 0, cH = 0, scW = 0, scH = 0, bbW = 0, bbH = 0;
-            if (!g_outputs.empty() && g_outputs[0].hwnd && g_outputs[0].swapchain) {
-                RECT cr{};
-                GetClientRect(g_outputs[0].hwnd, &cr);
-                cW = static_cast<UINT>(cr.right - cr.left);
-                cH = static_cast<UINT>(cr.bottom - cr.top);
-                DXGI_SWAP_CHAIN_DESC1 scd{};
-                if (SUCCEEDED(g_outputs[0].swapchain->GetDesc1(&scd))) {
-                    scW = scd.Width;
-                    scH = scd.Height;
-                }
-                ID3D11Texture2D* bb = nullptr;
-                if (SUCCEEDED(g_outputs[0].swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb))) && bb) {
-                    D3D11_TEXTURE2D_DESC bd{};
-                    bb->GetDesc(&bd);
-                    bbW = bd.Width;
-                    bbH = bd.Height;
-                    bb->Release();
-                }
+            double avgTotalMs = 0.0;
+            double avgCaptureMs = 0.0;
+            double avgRenderMs = 0.0;
+            double avgPresentMs = 0.0;
+            double avgWaitMs = 0.0;
+            double maxPresentMs = 0.0;
+            double maxWaitMs = 0.0;
+            double maxTotalMs = 0.0;
+            if (s_accFrameCount > 0) {
+                const double denom = static_cast<double>(s_accFrameCount);
+                avgTotalMs = s_accTotalMs / denom;
+                avgCaptureMs = s_accCaptureMs / denom;
+                avgRenderMs = s_accRenderMs / denom;
+                avgPresentMs = s_accPresentBlockMs / denom;
+                avgWaitMs = s_accWaitMs / denom;
+                maxPresentMs = s_maxPresentBlockMs;
+                maxWaitMs = s_maxWaitMs;
+                maxTotalMs = s_maxTotalMs;
             }
+            s_accTotalMs = 0.0;
+            s_accCaptureMs = 0.0;
+            s_accRenderMs = 0.0;
+            s_accPresentBlockMs = 0.0;
+            s_maxPresentBlockMs = 0.0;
+            s_accWaitMs = 0.0;
+            s_maxWaitMs = 0.0;
+            s_maxTotalMs = 0.0;
+            s_accFrameCount = 0;
 
-            uint32_t px = 0;
-            uint32_t px2 = 0;
-            uint32_t px3 = 0;
-            bool pxOk = false;
-            if (g_debugReadback1x1 && srvLocal) {
-                ID3D11Resource* res = nullptr;
-                srvLocal->GetResource(&res);
-                if (res) {
-                    ID3D11Texture2D* tex2d = nullptr;
-                    if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex2d))) && tex2d) {
-                        auto Read1x1 = [&](UINT sx, UINT sy, uint32_t& outPx) {
-                            D3D11_BOX box{sx, sy, 0, sx + 1, sy + 1, 1};
-                            g_d3d.ctx->CopySubresourceRegion(g_debugReadback1x1, 0, 0, 0, 0, tex2d, 0, &box);
-                            D3D11_MAPPED_SUBRESOURCE m{};
-                            if (SUCCEEDED(g_d3d.ctx->Map(g_debugReadback1x1, 0, D3D11_MAP_READ, 0, &m))) {
-                                if (m.pData) {
-                                    outPx = *reinterpret_cast<const uint32_t*>(m.pData);
-                                    pxOk = true;
-                                }
-                                g_d3d.ctx->Unmap(g_debugReadback1x1, 0);
-                            }
-                        };
-
-                        D3D11_TEXTURE2D_DESC rd{};
-                        tex2d->GetDesc(&rd);
-                        const UINT maxX = (rd.Width > 0) ? (rd.Width - 1) : 0;
-                        const UINT maxY = (rd.Height > 0) ? (rd.Height - 1) : 0;
-                        const UINT x0 = 0;
-                        const UINT y0 = 0;
-                        const UINT x1 = rd.Width ? (rd.Width / 2) : 0;
-                        const UINT y1 = rd.Height ? (rd.Height / 2) : 0;
-                        const UINT x2 = (maxX > 8) ? (maxX - 8) : maxX;
-                        const UINT y2 = (maxY > 8) ? (maxY - 8) : maxY;
-
-                        Read1x1(x0, y0, px);
-                        Read1x1(x1, y1, px2);
-                        Read1x1(x2, y2, px3);
-                        tex2d->Release();
-                    }
-                    res->Release();
-                }
-            }
-
-            // Heuristic: if capture content looks "stuck" (only 1-2 pixel values) for long enough,
-            // try Desktop Duplication as a fallback.
-            if (pxOk && !usingDd) {
-                const uint32_t sig = px ^ (px2 * 0x9E3779B1u) ^ (px3 * 0x85EBCA6Bu);
-                if (g_pxSampleCount == 0) {
-                    g_pxA = sig;
-                    g_pxUniqueCount = 1;
-                } else {
-                    if (sig != g_pxA) {
-                        if (g_pxUniqueCount == 1) {
-                            g_pxB = sig;
-                            g_pxUniqueCount = 2;
-                        } else if (g_pxUniqueCount == 2 && sig != g_pxB) {
-                            g_pxUniqueCount = 3; // enough variability
-                        }
-                    }
-                }
-
-                g_pxSampleCount++;
-
-                // In 3-monitor mode we start Desktop Duplication up-front; this heuristic is kept only
-                // for the (unused) WGC path.
-                if (g_pxSampleCount >= 5) {
-                    g_pxSampleCount = 0;
-                    g_pxUniqueCount = 0;
-                }
-            }
-
-            const float latencyUs = GetLatencyWorstOverLastSecondMs();
-            char buf[380];
+            char buf[420];
             snprintf(
                 buf,
                 sizeof(buf),
-                "[rj_surround] backend=%s mode=%s Latency(uS)=%.0f fx=%.0f fy=%.0f out=%ux%u win=%ux%u sc=%ux%u bb=%ux%u access=%d arrived=%llu copied=%llu using=%d size=%ux%u srcFmt=%u(%s) ownFmt=%u(%s) px=%08X/%08X/%08X pxOk=%d\n",
+                "[rj_surround] backend=%s fps=%.1f Latency(uS)=%.0f size=%ux%u expected=%ux%u@%u avg(ms) total=%.2f wait=%.2f cap=%.2f render=%.2f present=%.2f max(ms) wait=%.2f present=%.2f total=%.2f\n",
                 usingDd ? "DD" : "WGC",
-                mode,
+                static_cast<double>(fps),
                 static_cast<double>(latencyUs),
-                static_cast<double>(logFlipX),
-                static_cast<double>(logFlipY),
-                static_cast<unsigned>(outW),
-                static_cast<unsigned>(outH),
-                static_cast<unsigned>(cW),
-                static_cast<unsigned>(cH),
-                static_cast<unsigned>(scW),
-                static_cast<unsigned>(scH),
-                static_cast<unsigned>(bbW),
-                static_cast<unsigned>(bbH),
-                accessAllowed ? 1 : 0,
-                static_cast<unsigned long long>(arrived),
-                static_cast<unsigned long long>(copied),
-                usingCapture ? 1 : 0,
                 static_cast<unsigned>(w),
                 static_cast<unsigned>(h),
-                static_cast<unsigned>(srcFmt),
-                DxgiFormatName(srcFmt),
-                static_cast<unsigned>(ownFmt),
-                DxgiFormatName(ownFmt),
-                static_cast<unsigned>(px),
-                static_cast<unsigned>(px2),
-                static_cast<unsigned>(px3),
-                pxOk ? 1 : 0);
+                static_cast<unsigned>(g_haveExpectedMode ? g_expectedWideW : 0),
+                static_cast<unsigned>(g_haveExpectedMode ? g_expectedWideH : 0),
+                static_cast<unsigned>(g_haveExpectedMode ? g_expectedHz : 0),
+                avgTotalMs,
+                avgWaitMs,
+                avgCaptureMs,
+                avgRenderMs,
+                avgPresentMs,
+                maxWaitMs,
+                maxPresentMs,
+                maxTotalMs);
             OutputDebugStringA(buf);
             if (g_consoleReady) {
                 fputs(buf, stdout);
@@ -1073,6 +1080,10 @@ void RenderFrame() {
             }
         }
     }
+
+    LARGE_INTEGER qpcRenderStart{};
+    (void)QueryPerformanceCounter(&qpcRenderStart);
+    double presentBlockMsThisFrame = 0.0;
 
     for (auto& ow : g_outputs) {
         if (!ow.swapchain || !ow.rtv) continue;
@@ -1153,7 +1164,8 @@ void RenderFrame() {
                 capW = g_captureW;
             }
             const UINT outW = static_cast<UINT>(ow.rc.right - ow.rc.left);
-            const bool sliceEnabled = capW >= (outW * 3 - 32);
+            const UINT expectedW = g_haveExpectedMode ? g_expectedWideW : (outW * 3);
+            const bool sliceEnabled = capW >= (expectedW - 32);
             c->sliceEnabled = sliceEnabled ? 1.0f : 0.0f;
 
             // Provide viewport size so PS can compute UV from SV_Position robustly.
@@ -1175,8 +1187,52 @@ void RenderFrame() {
         }
 
         g_d3d.ctx->Draw(3, 0);
-        ow.swapchain->Present(1, 0);
+        if (ow.sliceIndex == 0) {
+            LARGE_INTEGER qpcBeforePresent{};
+            LARGE_INTEGER qpcAfterPresent{};
+            (void)QueryPerformanceCounter(&qpcBeforePresent);
+            ow.swapchain->Present(1, 0);
+            (void)QueryPerformanceCounter(&qpcAfterPresent);
+            presentBlockMsThisFrame += QpcToMs(qpcAfterPresent.QuadPart - qpcBeforePresent.QuadPart);
+        } else {
+            ow.swapchain->Present(0, 0);
+        }
+
+        // Measure copy-to-present latency for the most recent copied frame.
+        // We only update this when a new copy was observed (so idle periods don't spike the metric).
+        if (ow.sliceIndex == 0) {
+            EnsureQpcInit();
+            const long long copyQpc = g_lastCopyQpc.load(std::memory_order_relaxed);
+            if (copyQpc > 0 && copyQpc != s_lastLatencySeenCopyQpc && g_qpcFreq > 0) {
+                LARGE_INTEGER now{};
+                if (QueryPerformanceCounter(&now)) {
+                    const long long dt = now.QuadPart - copyQpc;
+                    double us = (static_cast<double>(dt) * 1000000.0) / static_cast<double>(g_qpcFreq);
+                    if (us < 0.0) us = 0.0;
+                    if (us > 50000.0) us = 50000.0;
+                    s_lastCopyToPresentUs = static_cast<float>(us);
+                    s_lastLatencySeenCopyQpc = copyQpc;
+                }
+            }
+        }
     }
+
+    LARGE_INTEGER qpcFrameEnd{};
+    (void)QueryPerformanceCounter(&qpcFrameEnd);
+    const double captureMs = QpcToMs(qpcAfterCapture.QuadPart - qpcFrameStart.QuadPart);
+    const double renderMs = QpcToMs(qpcFrameEnd.QuadPart - qpcRenderStart.QuadPart);
+    const double totalMs = QpcToMs(qpcFrameEnd.QuadPart - qpcFrameStart.QuadPart);
+    s_accCaptureMs += captureMs;
+    s_accRenderMs += renderMs;
+    s_accTotalMs += totalMs;
+    s_accPresentBlockMs += presentBlockMsThisFrame;
+    s_accWaitMs += waitMsThisFrame;
+    if (presentBlockMsThisFrame > s_maxPresentBlockMs) s_maxPresentBlockMs = presentBlockMsThisFrame;
+    if (waitMsThisFrame > s_maxWaitMs) s_maxWaitMs = waitMsThisFrame;
+    if (totalMs > s_maxTotalMs) s_maxTotalMs = totalMs;
+    s_accFrameCount++;
+
+    s_renderFrameCounter++;
 
     ID3D11ShaderResourceView* nullSrv = nullptr;
     g_d3d.ctx->PSSetShaderResources(0, 1, &nullSrv);
@@ -1265,6 +1321,20 @@ bool StartTakeover() {
         MessageBoxW(nullptr, L"Failed to start Desktop Duplication.", L"rj_surround", MB_OK | MB_ICONERROR);
         StopTakeover();
         return false;
+    }
+
+    {
+        UINT wideW = 0, wideH = 0, hz = 0;
+        g_haveExpectedMode = TryDeriveExpectedTripleWideModeFromMonitors(monArr, wideW, wideH, hz);
+        if (g_haveExpectedMode) {
+            g_expectedWideW = wideW;
+            g_expectedWideH = wideH;
+            g_expectedHz = hz;
+        } else {
+            g_expectedWideW = 0;
+            g_expectedWideH = 0;
+            g_expectedHz = 0;
+        }
     }
 
     g_running = true;
@@ -1440,6 +1510,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
         }
 
         RenderFrame();
-        Sleep(1);
+        Sleep(g_running ? 0 : 10);
     }
 }
