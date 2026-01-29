@@ -16,8 +16,8 @@ DriverVer= ; TODO: set DriverVer in stampinf property pages
 %ManufacturerName%=Standard,NT$ARCH$.10.0...22000
 
 [Standard.NT$ARCH$.10.0...22000]
-%DeviceName%=MyDevice_Install, Root\IddSampleDriver ; TODO: edit hw-id, this hardware id is used by Visual Studio remote debugging
-%DeviceName%=MyDevice_Install, IddSampleDriver      ; TODO: edit hw-id, this hardware if is used by the IddSampleApp.exe
+%DeviceName%=MyDevice_Install, Root\RJVirtualSurround ; TODO: edit hw-id, this hardware id is used by Visual Studio remote debugging
+%DeviceName%=MyDevice_Install, RJVirtualSurround      ; TODO: edit hw-id, this hardware if is used by the IddSampleApp.exe
 
 [SourceDisksFiles]
 IddSampleDriver.dll=1
@@ -39,7 +39,7 @@ AddReg = MyDevice_HardwareDeviceSettings
 
 [MyDevice_HardwareDeviceSettings]
 HKR,, "UpperFilters",  %REG_MULTI_SZ%, "IndirectKmd"
-HKR, "WUDF", "DeviceGroupId", %REG_SZ%, "IddSampleDriverGroup" ; TODO: edit driver group name, see README.md for more info
+HKR, "WUDF", "DeviceGroupId", %REG_SZ%, "RJVirtualSurroundGroup" ; TODO: edit driver group name, see README.md for more info
 
 [MyDevice_Install.NT.Services]
 Include=WUDFRD.inf
@@ -64,9 +64,9 @@ IddSampleDriver.dll
 ; =================== Generic ==================================
 
 [Strings]
-ManufacturerName="<Your manufacturer name>" ; TODO: Replace with your manufacturer name
-DiskName = "IddSampleDriver Installation Disk" ; TODO: Replace with driver disk name
-DeviceName="IddSampleDriver Device" ; TODO: Replace with correct device name
+ManufacturerName="RJ" ; TODO: Replace with your manufacturer name
+DiskName = "RJ Virtual Surround Installation Disk" ; TODO: Replace with driver disk name
+DeviceName="RJ Virtual Surround 7680x1440" ; TODO: Replace with correct device name
 
 REG_MULTI_SZ  = 0x00010000
 REG_SZ        = 0x00000000

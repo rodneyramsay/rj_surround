@@ -1,4 +1,4 @@
-# rj_surround
+# rj_span
 
 Win32 + D3D11 prototype that captures the **primary desktop** using **Windows Graphics Capture (WGC)** and displays it across **three full-screen borderless windows** (one per monitor), each window showing a different horizontal “slice” of the captured frame.
 
@@ -79,7 +79,7 @@ cmake --build build --config Release
 
 The executable will be at:
 
-- `build\Release\rj_surround.exe` (multi-config generators like Visual Studio)
+- `build\Release\rj_span.exe` (multi-config generators like Visual Studio)
 
 ## Run
 
@@ -222,7 +222,7 @@ float4 c = capTex.Sample(capSamp, uv);
 
 ## Project layout
 
-- `rj_surround.cpp`
+- `rj_span.cpp`
   - Entire app (Win32 + D3D11 + WGC)
 - `CMakeLists.txt`
   - Minimal build configuration

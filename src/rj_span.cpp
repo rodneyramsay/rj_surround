@@ -183,7 +183,7 @@ static void ToggleTestPattern() {
         g_expectedHz = 120;
     }
     if (g_consoleReady) {
-        printf("[rj_surround] TestPattern=%d\n", newVal ? 1 : 0);
+        printf("[rj_span] TestPattern=%d\n", newVal ? 1 : 0);
         fflush(stdout);
     }
 }
@@ -192,7 +192,7 @@ bool CheckHr(const HRESULT hr, const wchar_t* what) {
     if (SUCCEEDED(hr)) return true;
     wchar_t buf[512];
     wsprintfW(buf, L"%s failed (hr=0x%08X)", what, static_cast<unsigned>(hr));
-    MessageBoxW(nullptr, buf, L"rj_surround", MB_ICONERROR | MB_OK);
+    MessageBoxW(nullptr, buf, L"rj_span", MB_ICONERROR | MB_OK);
     return false;
 }
 
@@ -509,7 +509,7 @@ static bool StartDesktopDuplicationForMonitors(const MonitorDesc mons[3]) {
         if (!output) {
             adapter->Release();
             char buf[160];
-            snprintf(buf, sizeof(buf), "[rj_surround] DD: could not find output for monitor[%d]\n", m);
+            snprintf(buf, sizeof(buf), "[rj_span] DD: could not find output for monitor[%d]\n", m);
             OutputDebugStringA(buf);
             if (g_consoleReady) {
                 fputs(buf, stdout);
@@ -531,7 +531,7 @@ static bool StartDesktopDuplicationForMonitors(const MonitorDesc mons[3]) {
         if (FAILED(hr) || !g_ddDup[m]) {
             adapter->Release();
             char buf[160];
-            snprintf(buf, sizeof(buf), "[rj_surround] DD: DuplicateOutput[%d] failed hr=0x%08X\n", m, static_cast<unsigned>(hr));
+            snprintf(buf, sizeof(buf), "[rj_span] DD: DuplicateOutput[%d] failed hr=0x%08X\n", m, static_cast<unsigned>(hr));
             OutputDebugStringA(buf);
             if (g_consoleReady) {
                 fputs(buf, stdout);
@@ -1021,7 +1021,7 @@ void RenderFrame() {
                     if (hr != s_lastDdAcquireHr[m]) {
                         s_lastDdAcquireHr[m] = hr;
                         char buf[200];
-                        snprintf(buf, sizeof(buf), "[rj_surround] DD: AcquireNextFrame[%d] failed hr=0x%08X\n", m, static_cast<unsigned>(hr));
+                        snprintf(buf, sizeof(buf), "[rj_span] DD: AcquireNextFrame[%d] failed hr=0x%08X\n", m, static_cast<unsigned>(hr));
                         OutputDebugStringA(buf);
                         if (g_consoleReady) {
                             fputs(buf, stdout);
@@ -1183,7 +1183,7 @@ void RenderFrame() {
             snprintf(
                 buf,
                 sizeof(buf),
-                "[rj_surround] backend=%s ddmode=%s fps=%.1f Latency(uS)=%.0f size=%ux%u expected=%ux%u@%u avg(ms) total=%.2f wait=%.2f cap=%.2f render=%.2f present=%.2f max(ms) wait=%.2f present=%.2f total=%.2f\n",
+                "[rj_span] backend=%s ddmode=%s fps=%.1f Latency(uS)=%.0f size=%ux%u expected=%ux%u@%u avg(ms) total=%.2f wait=%.2f cap=%.2f render=%.2f present=%.2f max(ms) wait=%.2f present=%.2f total=%.2f\n",
                 usingTest ? "TEST" : (usingDd ? "DD" : "WGC"),
                 ddModeStr,
                 static_cast<double>(fps),
@@ -1380,8 +1380,8 @@ HWND CreateOutputWindow(const RECT& rc, int sliceIndex) {
 
     HWND hwnd = CreateWindowExW(
         exStyle,
-        L"RJ_SURROUND_OUTPUT",
-        L"rj_surround_output",
+        L"RJ_SPAN_OUTPUT",
+        L"rj_span_output",
         style,
         rc.left,
         rc.top,
@@ -1412,7 +1412,7 @@ bool StartTakeover() {
 
     auto mons = GetMonitorsSortedLeftToRight();
     if (mons.size() < 3) {
-        MessageBoxW(nullptr, L"Need at least 3 monitors enabled.", L"rj_surround", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Need at least 3 monitors enabled.", L"rj_span", MB_OK | MB_ICONERROR);
         return false;
     }
 
@@ -1437,7 +1437,7 @@ bool StartTakeover() {
                     }
                     char devA[64] = {};
                     (void)WideCharToMultiByte(CP_UTF8, 0, dev, -1, devA, static_cast<int>(sizeof(devA)), nullptr, nullptr);
-                    printf("[rj_surround] DD wide candidate: dev=%s %ux%u@%u\n", devA, static_cast<unsigned>(w), static_cast<unsigned>(h), static_cast<unsigned>(hz));
+                    printf("[rj_span] DD wide candidate: dev=%s %ux%u@%u\n", devA, static_cast<unsigned>(w), static_cast<unsigned>(h), static_cast<unsigned>(hz));
                     fflush(stdout);
                 }
                 break;
@@ -1452,7 +1452,7 @@ bool StartTakeover() {
         outs.push_back(mons[i]);
     }
     if (outs.size() < 3) {
-        MessageBoxW(nullptr, L"Need at least 3 physical monitors enabled (excluding the wide virtual display).", L"rj_surround", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Need at least 3 physical monitors enabled (excluding the wide virtual display).", L"rj_span", MB_OK | MB_ICONERROR);
         return false;
     }
 
@@ -1473,7 +1473,7 @@ bool StartTakeover() {
         g_outputs[i].sliceIndex = i;
         g_outputs[i].hwnd = CreateOutputWindow(outs[i].rc, i);
         if (!g_outputs[i].hwnd) {
-            MessageBoxW(nullptr, L"Failed to create output window.", L"rj_surround", MB_OK | MB_ICONERROR);
+            MessageBoxW(nullptr, L"Failed to create output window.", L"rj_span", MB_OK | MB_ICONERROR);
             DestroyOutputs();
             DestroyD3D();
             return false;
@@ -1491,14 +1491,14 @@ bool StartTakeover() {
     const MonitorDesc outArr[3] = {outs[0], outs[1], outs[2]};
     if (wideIdx >= 0) {
         if (!StartDesktopDuplicationForWideMonitor(mons[static_cast<size_t>(wideIdx)])) {
-            MessageBoxW(nullptr, L"Failed to start Desktop Duplication for wide monitor.", L"rj_surround", MB_OK | MB_ICONERROR);
+            MessageBoxW(nullptr, L"Failed to start Desktop Duplication for wide monitor.", L"rj_span", MB_OK | MB_ICONERROR);
             StopTakeover();
             return false;
         }
     } else {
         // Fallback: Desktop Duplication per monitor -> composite to wide -> slice to 3 windows.
         if (!StartDesktopDuplicationForMonitors(outArr)) {
-            MessageBoxW(nullptr, L"Failed to start Desktop Duplication.", L"rj_surround", MB_OK | MB_ICONERROR);
+            MessageBoxW(nullptr, L"Failed to start Desktop Duplication.", L"rj_span", MB_OK | MB_ICONERROR);
             StopTakeover();
             return false;
         }
@@ -1591,11 +1591,11 @@ bool RegisterWindowClasses() {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
 
     wc.lpfnWndProc = WndProc;
-    wc.lpszClassName = L"RJ_SURROUND_HIDDEN";
+    wc.lpszClassName = L"RJ_SPAN_HIDDEN";
     if (!RegisterClassExW(&wc)) return false;
 
     wc.lpfnWndProc = OutputWndProc;
-    wc.lpszClassName = L"RJ_SURROUND_OUTPUT";
+    wc.lpszClassName = L"RJ_SPAN_OUTPUT";
     if (!RegisterClassExW(&wc)) return false;
 
     return true;
@@ -1626,8 +1626,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
         freopen_s(&fp, "CONOUT$", "w", stdout);
         freopen_s(&fp, "CONOUT$", "w", stderr);
         g_consoleReady = true;
-        SetConsoleTitleW(L"rj_surround debug");
-        printf("rj_surround debug console\n");
+        SetConsoleTitleW(L"rj_span debug");
+        printf("rj_span debug console\n");
         printf("Hotkeys: Ctrl+Alt+S toggle, Ctrl+Alt+Q stop, Ctrl+Alt+T testpattern, Ctrl+Alt+X exit\n");
     }
 
@@ -1643,14 +1643,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     }
 
     if (!RegisterWindowClasses()) {
-        MessageBoxW(nullptr, L"Failed to register window classes.", L"rj_surround", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Failed to register window classes.", L"rj_span", MB_OK | MB_ICONERROR);
         return 1;
     }
 
     g_hiddenHwnd = CreateWindowExW(
         0,
-        L"RJ_SURROUND_HIDDEN",
-        L"rj_surround",
+        L"RJ_SPAN_HIDDEN",
+        L"rj_span",
         WS_OVERLAPPED,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
@@ -1662,24 +1662,24 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
         nullptr);
 
     if (!g_hiddenHwnd) {
-        MessageBoxW(nullptr, L"Failed to create hidden window.", L"rj_surround", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Failed to create hidden window.", L"rj_span", MB_OK | MB_ICONERROR);
         return 1;
     }
 
     if (!RegisterHotKey(g_hiddenHwnd, kHotkeyToggle, MOD_CONTROL | MOD_ALT, 'S')) {
-        MessageBoxW(nullptr, L"Failed to register Ctrl+Alt+S hotkey.", L"rj_surround", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Failed to register Ctrl+Alt+S hotkey.", L"rj_span", MB_OK | MB_ICONERROR);
         return 1;
     }
     if (!RegisterHotKey(g_hiddenHwnd, kHotkeyEmergencyStop, MOD_CONTROL | MOD_ALT, 'Q')) {
-        MessageBoxW(nullptr, L"Failed to register Ctrl+Alt+Q hotkey.", L"rj_surround", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Failed to register Ctrl+Alt+Q hotkey.", L"rj_span", MB_OK | MB_ICONERROR);
         return 1;
     }
     if (!RegisterHotKey(g_hiddenHwnd, kHotkeyExit, MOD_CONTROL | MOD_ALT, 'X')) {
-        MessageBoxW(nullptr, L"Failed to register Ctrl+Alt+X hotkey.", L"rj_surround", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Failed to register Ctrl+Alt+X hotkey.", L"rj_span", MB_OK | MB_ICONERROR);
         return 1;
     }
     if (!RegisterHotKey(g_hiddenHwnd, kHotkeyTestPattern, MOD_CONTROL | MOD_ALT, 'T')) {
-        MessageBoxW(nullptr, L"Failed to register Ctrl+Alt+T hotkey.", L"rj_surround", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Failed to register Ctrl+Alt+T hotkey.", L"rj_span", MB_OK | MB_ICONERROR);
         return 1;
     }
 

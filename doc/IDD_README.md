@@ -2,7 +2,7 @@
 
 Goal: make Windows 11 (and games) see **one large virtual monitor** (target: **7680x1440 @ 120Hz**) without using NVIDIA Surround.
 
-`rj_surround` today draws three click-through full-screen windows and shows a composited capture across 3 physical monitors. That does **not** change what resolutions games enumerate. Games learn available fullscreen modes from Windows’ display stack (WDDM/DXGI) and whatever display devices/drivers are present.
+`rj_span` today draws three click-through full-screen windows and shows a composited capture across 3 physical monitors. That does **not** change what resolutions games enumerate. Games learn available fullscreen modes from Windows’ display stack (WDDM/DXGI) and whatever display devices/drivers are present.
 
 To expose a true `7680x1440` mode to games, you need a **virtual display device**. On Windows 11, the supported path is an **Indirect Display Driver (IDD)** implemented via the **IddCx** class extension.
 
@@ -38,8 +38,8 @@ After installing WDK, Visual Studio should be able to open/build the sample driv
 ## High-level “software surround” pipeline
 
 1. Game renders to the **virtual** IDD monitor at `7680x1440`.
-2. `rj_surround` captures that virtual monitor.
-3. `rj_surround` slices/presents it across the 3 physical monitors.
+2. `rj_span` captures that virtual monitor.
+3. `rj_span` slices/presents it across the 3 physical monitors.
 
 ## Driver customization tasks (what you change in the sample)
 
@@ -111,9 +111,9 @@ If you want games to effectively see only the virtual monitor for a session:
 
 Re-enable the physical monitors afterwards.
 
-## How this integrates with `rj_surround` (next coding step)
+## How this integrates with `rj_span` (next coding step)
 
-Once the IDD is installed, update capture selection so `rj_surround` captures the **virtual** output instead of the physical monitors.
+Once the IDD is installed, update capture selection so `rj_span` captures the **virtual** output instead of the physical monitors.
 
 Current behavior:
 
